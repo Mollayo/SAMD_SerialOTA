@@ -20,7 +20,7 @@ public:
   // Enter the main loop. This should be placed in the setup or when the user wants to do the OTA update
   // This is a blocking function. In this loop, the MCU is listening to the serial connection waiting for
   // instructions for the OTA update
-  void loop();
+  void loop(uint32_t timeout=0);
 public:
   static char version[25];
 };

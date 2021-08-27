@@ -34,6 +34,8 @@ extern "C" {
 
 char SAMD_SerialOTA::version[]={0x00};
 
+namespace SAMD_SerialOTA_imp {
+
 OTAInternalFlash my_internal_storage;
 
 SerialPackets packetsOTA;
@@ -45,6 +47,8 @@ Stream* _debugPort=nullptr;
 
 bool doLoop=true;
 bool errorDownloadingFirmware=false;
+uint32_t otaTimeout=0;
+uint32_t baudRate=0;
 
 // For CRC computation
 CRC32 crc;
@@ -57,6 +61,7 @@ uint32_t firmware_size=0;
 uint8_t firmware_cmd=0;
 #define CMD_WRITE_FIRMWARE 1
 #define CMD_REBOOT         2
+#define CMD_CHANGE_BAUD    3
 
 unsigned long ledTime=millis();
 
@@ -148,7 +153,7 @@ bool firmwarePacketBegin(uint8_t * payload, uint8_t payloadSize)
   return true;
 }
 
-void firmwarePacketEnd(uint8_t * payload, uint8_t payloadSize)
+void firmwarePacketEnd()
 {
   if (errorDownloadingFirmware)
     return;
@@ -166,6 +171,13 @@ void firmwarePacketEnd(uint8_t * payload, uint8_t payloadSize)
   }
 }
 
+void firmwarePacketError(int errCode)
+{
+  // Error while receiving the firmware
+  // Do not write flash the firmware
+  packetsOTA.println("ABORD RECEIVING FIRMWARE");
+}
+
 //////////////////////////////////////////////////////////////////////////////
 // Getting the firmware data from the serial and write it down to the flash //
 //////////////////////////////////////////////////////////////////////////////
@@ -174,7 +186,9 @@ bool firmwarePacketReceived(uint8_t * payload, uint8_t payloadSize)
   // Shows some activities with the builtin led
   if (millis()-ledTime>100)
   {
+#ifdef LED_BUILTIN
     digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+#endif
     ledTime=millis();
   }
 
@@ -336,6 +350,14 @@ uint32_t crcFlash()
   return crc.finalize();
 }
 
+void stayInOTA()
+{
+  // If we receive a packet other than setting the baud rate, we stay in OTA forever
+  if (otaTimeout!=0)
+    packetsOTA.println("STAY IN OTA");
+  otaTimeout=0;
+}
+
 void packetReceived(uint8_t *payload, uint8_t payloadSize)
 {
   char* cmd=(char*)payload;
@@ -344,24 +366,21 @@ void packetReceived(uint8_t *payload, uint8_t payloadSize)
   if (strstr(cmd,"BAUD ")!=nullptr)
   {
     // Change the baud rate
-    uint32_t bd=atoi(&cmd[strlen("BAUD ")]);
-#ifdef SOFTWARESERIAL
-  if (_hwSerial)
-    _hwSerial->begin(bd);
-  else
-    _swSerial->begin(bd);
-#else
-    _hwSerial->begin(bd);
-#endif
+    baudRate=atoi(&cmd[strlen("BAUD ")]);
+    firmware_cmd=CMD_CHANGE_BAUD;
+    return;
   }
-  else if (strcmp(cmd,"FIRMWARE_CRC")==0)
+
+  if (strcmp(cmd,"FIRMWARE_CRC")==0)
   {
+    stayInOTA();
     // CRC32 from the flash
     uint32_t crc=crcFlash();
     packetsOTA.printf("%08X\n",crc);
   }
   else if (strstr(cmd,"PRINT_FLASH ")!=nullptr)
   {
+    stayInOTA();
     hexCharacterStringToBytes(flash_buff, &(cmd[strlen("PRINT_FLASH ")]));
     uint8_t tmp[4]={flash_buff[3],flash_buff[2],flash_buff[1],flash_buff[0]};
     uint32_t addr=((uint32_t*)tmp)[0];
@@ -372,26 +391,31 @@ void packetReceived(uint8_t *payload, uint8_t payloadSize)
   }
   else if (strcmp(cmd,"SCAN_FLASH")==0)
   {
+    stayInOTA();
     scanFlashForErrors();
     return;
   }
   else if (strcmp(cmd,"FIRMWARE_SIZE")==0)
   {
+    stayInOTA();
     packetsOTA.printf("%d\n",firmware_size);
   }
   else if (strcmp(cmd,"BLOCK_SIZE")==0)
   {
+    stayInOTA();
     // CRC from the received serial data
     packetsOTA.printf("%d\n",OTAInternalFlash::BLOCK_SIZE);
   }
   else if (strcmp(cmd,"REBOOT")==0)
   {
+    stayInOTA();
     // Reboot the MCU
     firmware_cmd=CMD_REBOOT;
     return;
   }
   else if (strcmp(cmd,"EXIT")==0)
   {
+    stayInOTA();
     // Continue to the main loop
     doLoop=false;
     packetsOTA.printf("EXITING OTA\n");
@@ -399,18 +423,22 @@ void packetReceived(uint8_t *payload, uint8_t payloadSize)
   }
   else if (strcmp(cmd,"SKETCH_ADDR")==0)
   {
+    stayInOTA();
     packetsOTA.printf("0x%08X\n",my_internal_storage.get_sketch_start_address());
   }
   else if (strcmp(cmd,"FLASH_ADDR")==0)
   {
+    stayInOTA();
     packetsOTA.printf("0x%08X\n",my_internal_storage.get_flash_address());
   }
   else if (strcmp(cmd,"FLASH_SIZE")==0)
   {
+    stayInOTA();
     packetsOTA.printf("%d\n",my_internal_storage.get_flash_size());
   }
   else if (strcmp(cmd,"WRITE_FIRMWARE")==0)
   {
+    stayInOTA();
     // The firmware should have been uploaded first (with no reboot in between)
     if (firmware_size==0)
       packetsOTA.printf("FIRMWARE NOT UPLOADED\n");
@@ -419,7 +447,13 @@ void packetReceived(uint8_t *payload, uint8_t payloadSize)
   }
   else if (strcmp(cmd,"VERSION")==0)
   {
+    stayInOTA();
     packetsOTA.printf("%s\n", SAMD_SerialOTA::version);
+  }
+  else if (strcmp(cmd,"OTA")==0)
+  {
+    // To force staying in OTA after the timeout
+    stayInOTA();
   }
   else
   {
@@ -437,52 +471,14 @@ void packetError(uint8_t *payload, uint8_t payload_size)
     _debugPort->printf("samd: error sending packet\n");
 }
 
-SAMD_SerialOTA::SAMD_SerialOTA(const char vers[])
+void loop(uint32_t timeout)
 {
-  if (strlen(vers)<sizeof(version))
-    memcpy(version,vers,strlen(vers));
-}
-
-void SAMD_SerialOTA::begin(HardwareSerial& hwSerial)
-{
-  _hwSerial=&hwSerial;
-#ifdef SOFTWARESERIAL
-  _swSerial=nullptr;
-#endif
-
-#if defined(__SAMD51__)
-  // Initialize the True Random Number Generator
-  trngInit();
-  packetsOTA.begin(*_hwSerial, trngGetRandomNumber());
-#else
-  packetsOTA.begin(*_hwSerial);
-#endif
-}
-
-#ifdef SOFTWARESERIAL
-void SAMD_SerialOTA::begin(SoftwareSerial& swSerial)
-{
-  _swSerial=&swSerial;
-  _hwSerial=nullptr;
-#if defined(__SAMD51__)
-  // Initialize the True Random Number Generator
-  trngInit();
-  packetsOTA.begin(*_swSerial, trngGetRandomNumber());
-#else
-  packetsOTA.begin(*_swSerial);
-#endif
-}
-#endif
-
-void SAMD_SerialOTA::setDebugPort(Stream& stream)
-{
-  _debugPort=&stream;
-}
-
-void SAMD_SerialOTA::loop() 
-{
+  otaTimeout=timeout;
+  uint32_t startTime=millis();
   doLoop=true;
+#ifdef LED_BUILTIN
   pinMode(LED_BUILTIN, OUTPUT);
+#endif
 
   packetsOTA.setReceiveCallback(packetReceived);
   packetsOTA.setErrorCallback(packetError);
@@ -491,16 +487,19 @@ void SAMD_SerialOTA::loop()
   packetsOTA.setOpenFileCallback(firmwarePacketBegin);
   packetsOTA.setReceiveFileDataCallback(firmwarePacketReceived);
   packetsOTA.setCloseFileCallback(firmwarePacketEnd);
+  packetsOTA.setErrorFileCallback(firmwarePacketError);
   if (_debugPort)
     packetsOTA.setDebugPort(*_debugPort);
 
-  packetsOTA.printf("ENTERING OTA\n");
+  packetsOTA.printf("ENTERING OTA WITH A TIMEOUT OF %d SEC.\n",otaTimeout);
 
   while(doLoop)
   {
-    if (millis()-ledTime>1000)
+    if (millis()-ledTime>500)
     {
+#ifdef LED_BUILTIN
       digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+#endif
       ledTime=millis();
     }
     // Process serial data
@@ -520,7 +519,77 @@ void SAMD_SerialOTA::loop()
       packetsOTA.printf("REBOOT NOW\n");
       NVIC_SystemReset();
     }
+    else if (firmware_cmd==CMD_CHANGE_BAUD)
+    {
+      packetsOTA.printf("CHANGE BAUDRATE TO %d\n",baudRate);
+#ifdef SOFTWARESERIAL
+      if (_hwSerial)
+        _hwSerial->begin(baudRate);
+      else
+        _swSerial->begin(baudRate);
+#else
+      _hwSerial->begin(baudRate);
+#endif
+      firmware_cmd=0;
+    }
+    // Check if the duration to stay in OTA is over
+    if (otaTimeout>0 && millis()-startTime>otaTimeout*1000)
+    {
+      packetsOTA.printf("TIME OVER. QUIT OTA\n");
+      break;
+    }
   }
+}
+
+}
+
+
+SAMD_SerialOTA::SAMD_SerialOTA(const char vers[])
+{
+  if (strlen(vers)<sizeof(version))
+    memcpy(version,vers,strlen(vers));
+}
+
+
+void SAMD_SerialOTA::begin(HardwareSerial& hwSerial)
+{
+  SAMD_SerialOTA_imp::_hwSerial=&hwSerial;
+#ifdef SOFTWARESERIAL
+  SAMD_SerialOTA_imp::_swSerial=nullptr;
+#endif
+
+#if defined(__SAMD51__)
+  // Initialize the True Random Number Generator
+  trngInit();
+  SAMD_SerialOTA_imp::packetsOTA.begin(*SAMD_SerialOTA_imp::_hwSerial, trngGetRandomNumber());
+#else
+  SAMD_SerialOTA_imp::packetsOTA.begin(*SAMD_SerialOTA_imp::_hwSerial);
+#endif
+}
+
+#ifdef SOFTWARESERIAL
+void SAMD_SerialOTA::begin(SoftwareSerial& swSerial)
+{
+  SAMD_SerialOTA_imp::_swSerial=&swSerial;
+  SAMD_SerialOTA_imp::_hwSerial=nullptr;
+#if defined(__SAMD51__)
+  // Initialize the True Random Number Generator
+  trngInit();
+  packetsOTA.begin(*SAMD_SerialOTA_imp::_swSerial, trngGetRandomNumber());
+#else
+  packetsOTA.begin(*SAMD_SerialOTA_imp::_swSerial);
+#endif
+}
+#endif
+
+void SAMD_SerialOTA::setDebugPort(Stream& stream)
+{
+  SAMD_SerialOTA_imp::_debugPort=&stream;
+}
+
+void SAMD_SerialOTA::loop(uint32_t timeout) 
+{
+  SAMD_SerialOTA_imp::loop(timeout);
 }
 
 

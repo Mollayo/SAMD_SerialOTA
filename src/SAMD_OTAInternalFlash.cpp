@@ -89,7 +89,7 @@ static void writeDataToFlash(uint8_t *flashAddress, uint8_t *ramAddress,uint32_t
             break;
           }
         }
-        // memcpy does not work in this context
+        // memcmp does not work in this context
         if (diff) { // >0 if different
           wait_ready();
           NVMCTRL->ADDR.reg = (uint32_t)dst; // Destination address in flash
@@ -114,7 +114,7 @@ static void writeDataToFlash(uint8_t *flashAddress, uint8_t *ramAddress,uint32_t
           break;
         }
       }
-      // memcpy does not work in this context
+      // memcmp does not work in this context
       if (diff) { // >0 if different
         // src might not be 32-bit aligned and must be read byte-at-a-time.
         // dst write ops MUST be 32-bit! Won't work with memcpy().
