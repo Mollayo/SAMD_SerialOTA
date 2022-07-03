@@ -20,9 +20,6 @@
 
 #include "SAMD_OTAInternalFlash.h"
 
-// For CRC32 checksum https://github.com/bakercp/CRC32
-#include <CRC32.h>
-
 
 #if defined(__SAMD51__)
 // https://github.com/SapientHetero/TRNG-for-ATSAMD51J19A-Adafruit-Metro-M4-
@@ -50,8 +47,6 @@ bool errorDownloadingFirmware=false;
 uint32_t otaTimeout=0;
 uint32_t baudRate=0;
 
-// For CRC computation
-CRC32 crc;
 
 
 uint8_t flash_buff[OTAInternalFlash::BLOCK_SIZE]={0x00};
@@ -144,7 +139,7 @@ bool firmwarePacketBegin(uint8_t * payload, uint8_t payloadSize)
     {
       // assume that payloadSize <=MAX_PAYLOAD_SIZE
       payload[payloadSize]=0x00;
-      packetsOTA.printf("NOT A FIRMWARE \"%s\"",payload);
+      packetsOTA.printf("NOT A FIRMWARE \"%s\"\n",payload);
       errorDownloadingFirmware=true;
       return false;
     }
@@ -153,10 +148,10 @@ bool firmwarePacketBegin(uint8_t * payload, uint8_t payloadSize)
   return true;
 }
 
-void firmwarePacketEnd()
+bool firmwarePacketEnd(uint32_t CRC)
 {
   if (errorDownloadingFirmware)
-    return;
+    return false;
 
   // Write down the remaining data to the flash if any
   bool OK=true;
@@ -167,15 +162,26 @@ void firmwarePacketEnd()
   // Write the firmware
   if (OK)
   {
-    firmware_cmd=CMD_WRITE_FIRMWARE;
+    packetsOTA.printf("CRC OF RECEIVED DATA: %08X\n",CRC);
+    // Check the CRC of the written data. Not tested
+    uint32_t writtenCRC=my_internal_storage.computeCRC(0x00,firmware_size);
+    packetsOTA.printf("CRC OF WRITEN DATA  : %08X\n",writtenCRC);
+    if (CRC==writtenCRC)
+      firmware_cmd=CMD_WRITE_FIRMWARE;
+    else
+    {
+      packetsOTA.println("CRC MISMATCH");
+      OK=false;
+    }
   }
+  return OK;
 }
 
 void firmwarePacketError(int errCode)
 {
   // Error while receiving the firmware
   // Do not write flash the firmware
-  packetsOTA.println("ABORD RECEIVING FIRMWARE");
+  packetsOTA.printf("ABORT RECEIVING FIRMWARE WITH ERROR %d\n",errCode);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -258,10 +264,10 @@ void scanFlashForErrors()
     // Compare the data
     if (!my_internal_storage.sameContent(flash_offset,(const void *)flash_buff,OTAInternalFlash::BLOCK_SIZE))
     {
-      packetsOTA.printf("ERROR AT 0x%08X\n",my_internal_storage.get_flash_address()+flash_offset);
+      packetsOTA.printf("ERROR AT 0x%08X\n",((uint8_t*)my_internal_storage.get_flash_address())+flash_offset);
       error=true;
     }
-    packetsOTA.printf("0x%08X\n",my_internal_storage.get_flash_address()+flash_offset);
+    packetsOTA.printf("0x%08X\n",((uint8_t*)my_internal_storage.get_flash_address())+flash_offset);
     flash_offset=flash_offset+OTAInternalFlash::BLOCK_SIZE;
   }
   if (error==false)
@@ -328,27 +334,6 @@ void hexCharacterStringToBytes(byte *byteArray, const char *hexString)
   }
 }
 
-//////////////////////////////////////////////////
-// Compute the CRC of the firmware in the flash //
-//////////////////////////////////////////////////
-uint32_t crcFlash() 
-{
-  CRC32 crc;
-  uint32_t flash_offset=0;
-  uint32_t buff_size=0;
-  while(flash_offset<firmware_size)
-  {
-    buff_size=OTAInternalFlash::BLOCK_SIZE;
-    if (buff_size+flash_offset>firmware_size)
-      buff_size=firmware_size-flash_offset;
-    my_internal_storage.read(flash_offset, flash_buff, buff_size);
-    
-    for (int i = 0; i < buff_size; i++) 
-      crc.update(flash_buff[i]);
-    flash_offset=flash_offset+buff_size;
-  }
-  return crc.finalize();
-}
 
 void stayInOTA()
 {
@@ -375,7 +360,7 @@ void packetReceived(uint8_t *payload, uint8_t payloadSize)
   {
     stayInOTA();
     // CRC32 from the flash
-    uint32_t crc=crcFlash();
+    uint32_t crc=my_internal_storage.computeCRC(0x00,firmware_size);
     packetsOTA.printf("%08X\n",crc);
   }
   else if (strstr(cmd,"PRINT_FLASH ")!=nullptr)
@@ -443,7 +428,7 @@ void packetReceived(uint8_t *payload, uint8_t payloadSize)
     if (firmware_size==0)
       packetsOTA.printf("FIRMWARE NOT UPLOADED\n");
     else
-      my_internal_storage.writeFirmwareAndReboot(firmware_size);
+      firmware_cmd=CMD_WRITE_FIRMWARE;
   }
   else if (strcmp(cmd,"VERSION")==0)
   {

@@ -10,7 +10,7 @@
 
 class SAMD_SerialOTA {
 public:
-  SAMD_SerialOTA(const char* version=__DATE__", "__TIME__);
+  SAMD_SerialOTA(const char* version=__DATE__ ", " __TIME__);
   // Initialise with the serial connection, either HardwareSerial or SoftwareSerial
 #ifdef SOFTWARESERIAL
   void begin(SoftwareSerial& swSerial);

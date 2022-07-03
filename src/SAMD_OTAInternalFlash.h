@@ -31,6 +31,7 @@ public:
 
   void write(uint32_t offset, const void *data, uint32_t size);
   void read(uint32_t offset, void *data, uint32_t size);
+  uint32_t computeCRC(uint32_t offset, uint32_t size);
   bool sameContent(uint32_t offset, const void *data, uint32_t size);
   void readAtAbsoluteAddr(uint32_t addr, void *data, uint32_t size);
 

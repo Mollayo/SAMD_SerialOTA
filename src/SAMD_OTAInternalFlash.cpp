@@ -21,6 +21,11 @@
 #include <Arduino.h>
 #include "SAMD_OTAInternalFlash.h"
 
+// https://github.com/bakercp/CRC32
+#include <CRC32.h>
+
+#undef FLASH_PAGE_SIZE
+#undef FLASH_SIZE
 
 #define FLASH_PAGE_SIZE (8 << NVMCTRL->PARAM.bit.PSZ)
 #define FLASH_NUM_PAGES NVMCTRL->PARAM.bit.NVMP
@@ -262,29 +267,38 @@ OTAInternalFlash::OTAInternalFlash()
   _flash_address = (uint8_t *)&__etext; // OK to overwrite the '0' there
   uint16_t partialBlock = (uint32_t)_flash_address % FLASH_BLOCK_SIZE;
   if (partialBlock) {
-    _flash_address += FLASH_BLOCK_SIZE - partialBlock;
+    _flash_address = ((uint8_t*)_flash_address) + (FLASH_BLOCK_SIZE - partialBlock);
   }
   // Move ahead one block. This shouldn't be necessary, but for
   // some reason certain programs are clobbering themselves.
-  _flash_address += FLASH_BLOCK_SIZE;
+  _flash_address = ((uint8_t*)_flash_address) + FLASH_BLOCK_SIZE;
   _flash_size=FLASH_SIZE-(int)_flash_address;
 }
 
 void OTAInternalFlash::write(uint32_t offset, const void *data, uint32_t size)
 {
-  writeDataToFlash((uint8_t*)(_flash_address+offset), (uint8_t*)data, size);
+  writeDataToFlash((uint8_t*)(_flash_address)+offset, (uint8_t*)data, size);
 }
 
 
 void OTAInternalFlash::read(uint32_t offset, void *data, uint32_t size)
 {
-  memcpy(data, _flash_address+offset, size);
+  memcpy(data, (uint8_t*)(_flash_address)+offset, size);
+}
+
+// Compute the CRC32
+uint32_t OTAInternalFlash::computeCRC(uint32_t offset, uint32_t size)
+{
+  CRC32 firmware_crc;
+  for (uint32_t i=0; i<size;i++)
+    firmware_crc.update(((const uint8_t*)(_flash_address)+offset)[i]);
+  return firmware_crc.finalize();;
 }
 
 bool OTAInternalFlash::sameContent(uint32_t offset, const void *data, uint32_t size)
 {
   for (uint32_t i=0; i<size;i++)
-    if ((((uint8_t*)(_flash_address+offset))[i]!=((const uint8_t*)data)[i]))
+    if (((const uint8_t*)(_flash_address)+offset)[i]!=((const uint8_t*)data)[i])
       return false;
   return true;
 }
